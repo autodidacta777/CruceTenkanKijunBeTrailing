@@ -1,0 +1,172 @@
+//+------------------------------------------------------------------+
+//|         EA Cruce Kijun-Tenkan - 2 Operaciones + BE + Trailing    |
+//|                         por Jhonny                               |
+//+------------------------------------------------------------------+
+#property strict
+
+//--- Parámetros configurables
+input double Lotes = 0.01;
+input double StopLossPips = 30;
+input double TakeProfitPips = 70;
+input double BreakEvenPips = 15;   // cuando va +15 pips pone SL en BE
+input double TrailingDistance = 15;
+input double TrailingStep = 5;
+
+//+------------------------------------------------------------------+
+//| Convierte pips a puntos                                          |
+//+------------------------------------------------------------------+
+double PipsToPoints(double pips)
+{
+   if (Digits == 3 || Digits == 5)
+      return pips * 10 * Point;
+   else
+      return pips * Point;
+}
+
+//+------------------------------------------------------------------+
+//| Obtiene valores del Ichimoku                                     |
+//+------------------------------------------------------------------+
+void ObtenerIchimoku(double &tenkanActual, double &kijunActual,
+                     double &tenkanAnterior, double &kijunAnterior)
+{
+   int tenkanPeriodo = 9;
+   int kijunPeriodo = 26;
+
+   tenkanActual   = iIchimoku(NULL, 0, tenkanPeriodo, kijunPeriodo, 52, MODE_TENKANSEN, 0);
+   tenkanAnterior = iIchimoku(NULL, 0, tenkanPeriodo, kijunPeriodo, 52, MODE_TENKANSEN, 1);
+   kijunActual    = iIchimoku(NULL, 0, tenkanPeriodo, kijunPeriodo, 52, MODE_KIJUNSEN, 0);
+   kijunAnterior  = iIchimoku(NULL, 0, tenkanPeriodo, kijunPeriodo, 52, MODE_KIJUNSEN, 1);
+}
+
+//+------------------------------------------------------------------+
+//| Abre las dos operaciones                                         |
+//+------------------------------------------------------------------+
+void AbrirOperaciones(int tipo)
+{
+   double sl, tp, price;
+   double slPoints = PipsToPoints(StopLossPips);
+   double tpPoints = PipsToPoints(TakeProfitPips);
+
+   if (tipo == OP_BUY)
+   {
+      price = Ask;
+      sl = price - slPoints;
+      tp = price + tpPoints;
+
+      // 1ª operación con TP fijo
+      int ticket1 = OrderSend(Symbol(), OP_BUY, Lotes, Ask, 3, sl, tp, "KijunTenkan BUY TP", 0, 0, clrBlue);
+
+      // 2ª operación sin TP, con BE + trailing
+      int ticket2 = OrderSend(Symbol(), OP_BUY, Lotes, Ask, 3, sl, 0, "KijunTenkan BUY BE", 0, 0, clrAqua);
+
+      if (ticket1 < 0 || ticket2 < 0)
+         Print("Error al abrir BUY: ", GetLastError());
+   }
+   else if (tipo == OP_SELL)
+   {
+      price = Bid;
+      sl = price + slPoints;
+      tp = price - tpPoints;
+
+      // 1ª operación con TP fijo
+      int ticket1 = OrderSend(Symbol(), OP_SELL, Lotes, Bid, 3, sl, tp, "KijunTenkan SELL TP", 0, 0, clrRed);
+
+      // 2ª operación sin TP, con BE + trailing
+      int ticket2 = OrderSend(Symbol(), OP_SELL, Lotes, Bid, 3, sl, 0, "KijunTenkan SELL BE", 0, 0, clrOrange);
+
+      if (ticket1 < 0 || ticket2 < 0)
+         Print("Error al abrir SELL: ", GetLastError());
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Break-even y trailing dinámico                                   |
+//+------------------------------------------------------------------+
+void GestionDinamica()
+{
+   double beDist = PipsToPoints(BreakEvenPips);
+   double trailDist = PipsToPoints(TrailingDistance);
+   double step = PipsToPoints(TrailingStep);
+
+   for (int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      if (OrderSelect(i, SELECT_BY_POS, MODE_TRADES) && OrderSymbol() == Symbol())
+      {
+         string comment = OrderComment();
+         if (StringFind(comment, "BE") == -1) continue;
+
+         if (OrderType() == OP_BUY)
+         {
+            double profitPips = (Bid - OrderOpenPrice()) / Point / 10;
+
+            // Paso 1: mover a BreakEven
+            if (profitPips >= BreakEvenPips && OrderStopLoss() < OrderOpenPrice())
+            {
+               double nuevoSL = OrderOpenPrice() + PipsToPoints(0.1);
+               OrderModify(OrderTicket(), OrderOpenPrice(), nuevoSL, 0, 0, clrGreen);
+               Print("BUY movido a BreakEven");
+            }
+
+            // Paso 2: activar trailing
+            if (OrderStopLoss() >= OrderOpenPrice())
+            {
+               double nuevoSL = Bid - trailDist;
+               if (nuevoSL > OrderStopLoss() + step)
+                  OrderModify(OrderTicket(), OrderOpenPrice(), nuevoSL, 0, 0, clrLime);
+            }
+         }
+
+         if (OrderType() == OP_SELL)
+         {
+            double profitPips = (OrderOpenPrice() - Ask) / Point / 10;
+
+            // Paso 1: mover a BreakEven
+            if (profitPips >= BreakEvenPips && OrderStopLoss() > OrderOpenPrice())
+            {
+               double nuevoSL = OrderOpenPrice() - PipsToPoints(0.1);
+               OrderModify(OrderTicket(), OrderOpenPrice(), nuevoSL, 0, 0, clrGreen);
+               Print("SELL movido a BreakEven");
+            }
+
+            // Paso 2: activar trailing
+            if (OrderStopLoss() <= OrderOpenPrice())
+            {
+               double nuevoSL = Ask + trailDist;
+               if (nuevoSL < OrderStopLoss() - step)
+                  OrderModify(OrderTicket(), OrderOpenPrice(), nuevoSL, 0, 0, clrLime);
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Función principal OnTick                                         |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   double tenkanActual, kijunActual, tenkanAnterior, kijunAnterior;
+   ObtenerIchimoku(tenkanActual, kijunActual, tenkanAnterior, kijunAnterior);
+
+   //--- Detectar cruce Tenkan-Kijun
+   bool cruceAlcista = tenkanAnterior < kijunAnterior && tenkanActual > kijunActual;
+   bool cruceBajista = tenkanAnterior > kijunAnterior && tenkanActual < kijunActual;
+
+   //--- Verificar si ya hay operaciones abiertas
+   bool hayOperacion = false;
+   for (int i = 0; i < OrdersTotal(); i++)
+   {
+      if (OrderSelect(i, SELECT_BY_POS, MODE_TRADES) && OrderSymbol() == Symbol())
+         hayOperacion = true;
+   }
+
+   //--- Señales
+   if (!hayOperacion && cruceAlcista)
+      AbrirOperaciones(OP_BUY);
+
+   if (!hayOperacion && cruceBajista)
+      AbrirOperaciones(OP_SELL);
+
+   //--- Gestión de break-even y trailing
+   GestionDinamica();
+}
